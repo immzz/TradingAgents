@@ -1,10 +1,16 @@
+import hashlib
 import json
+from pathlib import Path
 
 import pytest
 
 from tradingagents.decision_intelligence_runner import (
+    _validated_codex_news_context,
+    CHECKPOINT_CONTRACT,
     CONTRACT_VERSION,
+    OPERATION_CONTRACT,
     ResearchSynthesis,
+    build_synthesis_prompt,
     invoke_synthesis,
     merge_synthesis,
     run_queue,
@@ -157,6 +163,10 @@ def _synthesis():
     )
 
 
+def _sha(path):
+    return hashlib.sha256(path.read_bytes()).hexdigest()
+
+
 def _task(task_id, strategy):
     return {
         "task_id": task_id,
@@ -236,6 +246,87 @@ def test_synthesis_uses_strict_schema_validated_json_fallback():
     assert result.scenario_model.scenarios[0].name == "bear"
 
 
+def test_validated_codex_news_injection_exposes_interpretation_but_not_raw_prose(tmp_path):
+    bundle = tmp_path / "news_pipeline_2026-07-15_run.json"
+    analysis = tmp_path / "news_analysis_2026-07-15_run.json"
+    operation = tmp_path / "news_operation_2026-07-15_run.json"
+    bundle.write_text('{"status":"ok"}', encoding="utf-8")
+    bundle_sha = _sha(bundle)
+    analysis_payload = {
+        "schema_version": "news_analysis.v3",
+        "contract_version": "codex-news-impact.v3",
+        "provider": "codex_automation",
+        "authorship": {"mode": "direct_skill_execution"},
+        "analysis_ready": True,
+        "decision_ready": True,
+        "status": "ready",
+        "trading_date": "2026-07-15",
+        "model": "codex-test",
+        "events": [
+            {
+                "event_id": "event-1",
+                "affected_tickers": ["SMH"],
+                "analysis_layers": ["supply_chain"],
+                "direction": "positive",
+                "summary_zh": "CODEX_INTERPRETED_SUMMARY",
+                "source_article_ids": ["article-1"],
+                "scenarios": [],
+            }
+        ],
+        "ticker_impacts": [{"ticker": "SMH", "expected_price_impact_pct": 2.0}],
+        "source_articles": [
+            {
+                "article_id": "article-1",
+                "title": "RAW_HEADLINE_MUST_NOT_APPEAR",
+                "summary": "RAW_BODY_MUST_NOT_APPEAR",
+                "url": "https://example.test/primary",
+                "published_at": "2026-07-15T12:00:00Z",
+                "observed_at": "2026-07-15T12:01:00Z",
+                "available_at": "2026-07-15T12:01:00Z",
+                "retrieved_at": "2026-07-15T12:01:00Z",
+                "origin_domain": "example.test",
+                "origin_category": "company_primary",
+                "quality_tier": "A",
+                "provider_families": ["company"],
+            }
+        ],
+    }
+    analysis.write_text(json.dumps(analysis_payload), encoding="utf-8")
+    analysis_sha = _sha(analysis)
+    operation.write_text(
+        json.dumps(
+            {
+                "schema_version": "news_research_operation.v2",
+                "status": "ok",
+                "lineage": {"analysis_sha256": analysis_sha, "bundle_sha256": bundle_sha},
+            }
+        ),
+        encoding="utf-8",
+    )
+    task = _task("task-news", "Strategy A")
+    task["as_of_date"] = "2026-07-15"
+    task["ticker"] = "SMH"
+    task["canonical_news_lineage"] = {
+        "analysis_path": str(analysis),
+        "analysis_sha256": analysis_sha,
+        "operation_path": str(operation),
+        "operation_sha256": _sha(operation),
+        "bundle_path": str(bundle),
+        "bundle_sha256": bundle_sha,
+    }
+
+    context = _validated_codex_news_context(task)
+    prompt = build_synthesis_prompt(task, {}, "HOLD", context)
+
+    assert context["status"] == "ready"
+    assert context["events"][0]["summary_zh"] == "CODEX_INTERPRETED_SUMMARY"
+    assert context["source_metadata"][0]["url"] == "https://example.test/primary"
+    assert context["raw_headlines_exposed"] is False
+    assert "RAW_HEADLINE_MUST_NOT_APPEAR" not in prompt
+    assert "RAW_BODY_MUST_NOT_APPEAR" not in prompt
+    assert "CODEX_INTERPRETED_SUMMARY" in prompt
+
+
 def test_synthesis_json_fallback_rejects_free_prose():
     class BrokenStructured:
         def invoke(self, prompt):
@@ -259,7 +350,7 @@ def test_merge_synthesis_preserves_task_identity_and_builds_evidence_links():
     assert card["macro_context"]["supports_proposal"] is True
 
 
-def test_batch_reuses_tradingagents_by_ticker_and_resumes_from_checkpoint(tmp_path):
+def test_batch_reuses_by_ticker_but_disables_unsound_cross_run_cache(tmp_path):
     FakeGraph.propagations = 0
     queue = tmp_path / "queue.json"
     queue.write_text(
@@ -278,6 +369,8 @@ def test_batch_reuses_tradingagents_by_ticker_and_resumes_from_checkpoint(tmp_pa
     )
 
     assert first["summary"]["tasks_completed"] == 2
+    assert first["summary"]["tasks_validated"] == 2
+    assert first["summary"]["tasks_invalid"] == 0
     assert first["summary"]["unique_tickers_analyzed"] == 1
     assert FakeGraph.propagations == 1
     assert len(llm.structured.calls) == 2
@@ -297,11 +390,16 @@ def test_batch_reuses_tradingagents_by_ticker_and_resumes_from_checkpoint(tmp_pa
         validator=lambda card: {"ready": True},
     )
 
-    assert second["summary"]["tasks_reused"] == 2
-    assert second["summary"]["unique_tickers_analyzed"] == 0
-    assert FakeGraph.propagations == 1
+    assert second["summary"]["tasks_reused"] == 0
+    assert second["summary"]["cross_run_cache_enabled"] is False
+    assert second["summary"]["unique_tickers_analyzed"] == 1
+    assert FakeGraph.propagations == 2
     assert first["source_queue_sha256"] != second["source_queue_sha256"]
-    assert second["run_signature"]["checkpoint_contract"] == "decision-intelligence-task.v1"
+    assert second["run_signature"]["checkpoint_contract"] == CHECKPOINT_CONTRACT
+    operation = json.loads((tmp_path / "out" / second["artifacts"]["operation_json"]).read_text())
+    assert operation["schema_version"] == OPERATION_CONTRACT
+    assert operation["status"] == "ok"
+    assert operation["decision_ready"] is True
 
 
 def test_batch_preserves_task_error_and_continues(tmp_path):
@@ -327,9 +425,69 @@ def test_batch_preserves_task_error_and_continues(tmp_path):
     assert result["summary"]["tasks_failed"] == 1
     assert result["summary"]["scorecards_written"] == 0
     assert "provider unavailable" in result["results"][0]["error"]
+    assert result["status"] == "blocked"
 
 
-def test_batch_preserves_matching_existing_cards_for_incremental_review(tmp_path):
+def test_twenty_five_tasks_across_eleven_tickers_execute_at_most_eleven_graphs(tmp_path):
+    FakeGraph.propagations = 0
+    tickers = [f"T{i:02d}" for i in range(11)]
+    tasks = []
+    for index in range(25):
+        task = _task(f"task-{index:02d}", f"strategy-{index:02d}")
+        task["ticker"] = tickers[index % len(tickers)]
+        task["scorecard_template"]["symbol"] = task["ticker"]
+        tasks.append(task)
+    queue = tmp_path / "queue.json"
+    queue.write_text(json.dumps({"as_of_date": "2026-07-10", "tasks": tasks}), encoding="utf-8")
+
+    result = run_queue(
+        queue_path=queue,
+        out_dir=tmp_path / "out",
+        run_id="capacity-fixture",
+        graph_factory=FakeGraph,
+        synthesis_llm=FakeLLM(),
+        validator=lambda _card: {"ready": True},
+    )
+
+    assert result["summary"]["tasks_validated"] == 25
+    assert result["summary"]["unique_research_fingerprints"] == 11
+    assert result["summary"]["graph_executions"] == 11
+    assert result["summary"]["duplicate_graph_executions"] == 0
+    assert FakeGraph.propagations == 11
+
+
+def test_interrupted_same_run_resumes_research_and_checkpoint_without_new_graph(tmp_path):
+    FakeGraph.propagations = 0
+    queue = tmp_path / "queue.json"
+    queue.write_text(json.dumps({"as_of_date": "2026-07-10", "tasks": [_task("task-1", "A")]}), encoding="utf-8")
+    out = tmp_path / "out"
+    first = run_queue(
+        queue_path=queue,
+        out_dir=out,
+        run_id="resume-run",
+        graph_factory=FakeGraph,
+        synthesis_llm=FakeLLM(),
+        validator=lambda _card: {"ready": True},
+    )
+    for key in ("analysis_json", "scorecards_json", "operation_json"):
+        Path(first["artifacts"][key]).unlink()
+
+    resumed = run_queue(
+        queue_path=queue,
+        out_dir=out,
+        run_id="resume-run",
+        graph_factory=FakeGraph,
+        synthesis_llm=FakeLLM(),
+        validator=lambda _card: {"ready": True},
+    )
+
+    assert resumed["summary"]["tasks_reused"] == 1
+    assert resumed["summary"]["same_run_research_resumes"] == 1
+    assert resumed["summary"]["graph_executions"] == 0
+    assert FakeGraph.propagations == 1
+
+
+def test_batch_does_not_copy_unvalidated_existing_cards_into_v2_output(tmp_path):
     prior = {"llm_confirmation_task_id": "task-confirmed", "symbol": "OLD", "llm_decision": "confirm"}
     queue = tmp_path / "queue.json"
     queue.write_text(
@@ -359,8 +517,143 @@ def test_batch_preserves_matching_existing_cards_for_incremental_review(tmp_path
     )
 
     cards = json.loads((tmp_path / "out" / "llm_confirmation_auto_scorecards_latest.json").read_text())
-    assert result["summary"]["scorecards_preserved"] == 1
-    assert {card["llm_confirmation_task_id"] for card in cards["candidates"]} == {
-        "task-confirmed",
-        "task-pending",
-    }
+    assert result["summary"]["scorecards_preserved"] == 0
+    assert {card["llm_confirmation_task_id"] for card in cards["candidates"]} == {"task-pending"}
+
+
+def test_validation_false_is_invalid_and_never_enters_scorecard_artifact(tmp_path):
+    queue = tmp_path / "queue.json"
+    queue.write_text(json.dumps({"as_of_date": "2026-07-10", "tasks": [_task("task-1", "A")]}))
+
+    result = run_queue(
+        queue_path=queue,
+        out_dir=tmp_path / "out",
+        run_id="invalid",
+        graph_factory=FakeGraph,
+        synthesis_llm=FakeLLM(),
+        validator=lambda card: {"ready": False, "reasons": ["primary source missing"]},
+    )
+
+    assert result["status"] == "blocked"
+    assert result["summary"]["tasks_validated"] == 0
+    assert result["summary"]["tasks_invalid"] == 1
+    assert result["results"][0]["status"] == "invalid"
+    cards = json.loads((tmp_path / "out" / "llm_confirmation_auto_scorecards_latest.json").read_text())
+    assert cards["status"] == "blocked"
+    assert cards["candidates"] == []
+    operation = json.loads(Path(result["artifacts"]["operation_json"]).read_text())
+    assert operation["status"] == "blocked"
+    assert operation["decision_ready"] is False
+
+
+def test_real_2026_07_14_smh_validation_fixture_is_invalid_under_v2(tmp_path):
+    fixture_path = Path(__file__).parent / "fixtures" / "decision_intelligence_invalid_smh_2026-07-14.json"
+    fixture = json.loads(fixture_path.read_text(encoding="utf-8"))
+    queue = tmp_path / "queue.json"
+    task = _task(fixture["task_id"], "IC factor rotation momentum active top1")
+    task["ticker"] = fixture["ticker"]
+    task["scorecard_template"]["symbol"] = fixture["ticker"]
+    queue.write_text(json.dumps({"as_of_date": "2026-07-14", "tasks": [task]}), encoding="utf-8")
+
+    result = run_queue(
+        queue_path=queue,
+        out_dir=tmp_path / "out",
+        run_id="smh-regression",
+        graph_factory=FakeGraph,
+        synthesis_llm=FakeLLM(),
+        validator=lambda card: fixture["validation"],
+    )
+
+    assert fixture["legacy_status"] == "ok"
+    assert result["results"][0]["status"] == fixture["expected_v2_status"]
+    assert result["summary"]["tasks_invalid"] == 1
+    assert result["summary"]["scorecards_written"] == 0
+
+
+def test_v1_checkpoint_and_validation_false_v2_cache_are_not_reused(tmp_path):
+    FakeGraph.propagations = 0
+    queue = tmp_path / "queue.json"
+    queue.write_text(json.dumps({"as_of_date": "2026-07-10", "tasks": [_task("task-1", "A")]}))
+    out = tmp_path / "out"
+    out.mkdir()
+    (out / "llm_confirmation_auto_checkpoint.json").write_text(
+        json.dumps({"signature": {"checkpoint_contract": "decision-intelligence-task.v1"}, "tasks": {"bad": {"status": "ok"}}})
+    )
+
+    first = run_queue(
+        queue_path=queue,
+        out_dir=out,
+        run_id="first",
+        graph_factory=FakeGraph,
+        synthesis_llm=FakeLLM(),
+        validator=lambda card: {"ready": False, "reasons": ["invalid"]},
+    )
+    second = run_queue(
+        queue_path=queue,
+        out_dir=out,
+        run_id="second",
+        graph_factory=FakeGraph,
+        synthesis_llm=FakeLLM(),
+        validator=lambda card: {"ready": True},
+    )
+
+    assert first["summary"]["tasks_invalid"] == 1
+    assert second["summary"]["tasks_reused"] == 0
+    assert second["summary"]["tasks_validated"] == 1
+    assert FakeGraph.propagations == 2
+
+
+def test_corrupt_v2_checkpoint_is_ignored_and_rebuilt_fail_closed(tmp_path):
+    FakeGraph.propagations = 0
+    queue = tmp_path / "queue.json"
+    queue.write_text(json.dumps({"as_of_date": "2026-07-10", "tasks": [_task("task-1", "A")]}))
+    out = tmp_path / "out"
+    out.mkdir()
+    (out / "llm_confirmation_auto_checkpoint_v2.json").write_text("{corrupt", encoding="utf-8")
+
+    result = run_queue(
+        queue_path=queue,
+        out_dir=out,
+        run_id="corrupt-checkpoint",
+        graph_factory=FakeGraph,
+        synthesis_llm=FakeLLM(),
+        validator=lambda _card: {"ready": True},
+    )
+
+    assert result["summary"]["tasks_reused"] == 0
+    assert result["summary"]["tasks_validated"] == 1
+    assert FakeGraph.propagations == 1
+
+
+def test_confirmation_prompt_excludes_raw_news_and_social_prose():
+    task = _task("task-1", "A")
+    task["news_context"] = {"headlines": ["RAW_HEADLINE_SENTINEL"]}
+    prompt = build_synthesis_prompt(
+        task,
+        {
+            "market_report": "structured price context",
+            "fundamentals_report": "structured filing fields",
+            "news_report": "RAW_NEWS_REPORT_SENTINEL",
+            "sentiment_report": "RAW_SOCIAL_REPORT_SENTINEL",
+        },
+        "HOLD",
+    )
+
+    assert "RAW_HEADLINE_SENTINEL" not in prompt
+    assert "RAW_NEWS_REPORT_SENTINEL" not in prompt
+    assert "RAW_SOCIAL_REPORT_SENTINEL" not in prompt
+
+
+def test_confirmation_rejects_news_and_social_analysts(tmp_path):
+    queue = tmp_path / "queue.json"
+    queue.write_text(json.dumps({"as_of_date": "2026-07-10", "tasks": [_task("task-1", "A")]}))
+
+    with pytest.raises(ValueError, match="unsupported analysts: news, social"):
+        run_queue(
+            queue_path=queue,
+            out_dir=tmp_path / "out",
+            analysts=["market", "news", "social", "fundamentals"],
+            graph_factory=FakeGraph,
+            synthesis_llm=FakeLLM(),
+            validator=lambda card: {"ready": True},
+        )

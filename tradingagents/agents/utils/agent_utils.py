@@ -5,6 +5,7 @@ from typing import Any
 
 import yfinance as yf
 from langchain_core.messages import HumanMessage, RemoveMessage
+from tradingagents.dataflows.input_capture import execute
 
 # Import tools from separate utility files
 from tradingagents.agents.utils.core_stock_tools import get_stock_data
@@ -93,30 +94,33 @@ def resolve_instrument_identity(ticker: str) -> dict:
     The symbol is normalized first (e.g. ``XAUUSD`` -> ``GC=F``) so identity
     resolves for the same instrument the price path actually fetches (#983).
     """
-    from tradingagents.dataflows.symbol_utils import normalize_symbol
+    def resolve() -> dict:
+        from tradingagents.dataflows.symbol_utils import normalize_symbol
 
-    try:
-        info = yf.Ticker(normalize_symbol(ticker)).info or {}
-    except Exception as exc:  # noqa: BLE001 — fail open, never block the run
-        logger.debug("Could not resolve instrument identity for %s: %s", ticker, exc)
-        return {}
+        try:
+            info = yf.Ticker(normalize_symbol(ticker)).info or {}
+        except Exception as exc:  # noqa: BLE001 — fail open, never block the run
+            logger.debug("Could not resolve instrument identity for %s: %s", ticker, exc)
+            return {}
 
-    identity: dict[str, str] = {}
-    company_name = _clean_identity_value(info.get("longName")) or _clean_identity_value(
-        info.get("shortName")
-    )
-    if company_name:
-        identity["company_name"] = company_name
-    for source_key, target_key in (
-        ("sector", "sector"),
-        ("industry", "industry"),
-        ("exchange", "exchange"),
-        ("quoteType", "quote_type"),
-    ):
-        value = _clean_identity_value(info.get(source_key))
-        if value:
-            identity[target_key] = value
-    return identity
+        identity: dict[str, str] = {}
+        company_name = _clean_identity_value(info.get("longName")) or _clean_identity_value(
+            info.get("shortName")
+        )
+        if company_name:
+            identity["company_name"] = company_name
+        for source_key, target_key in (
+            ("sector", "sector"),
+            ("industry", "industry"),
+            ("exchange", "exchange"),
+            ("quoteType", "quote_type"),
+        ):
+            value = _clean_identity_value(info.get(source_key))
+            if value:
+                identity[target_key] = value
+        return identity
+
+    return execute("resolve_instrument_identity", (ticker,), {}, resolve)
 
 
 def build_instrument_context(
@@ -212,6 +216,5 @@ def create_msg_delete():
         return {"messages": removal_operations + [placeholder]}
 
     return delete_messages
-
 
 

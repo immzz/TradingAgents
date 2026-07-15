@@ -1,0 +1,19 @@
+{
+  "source_analysis_json": "runtime/trading-data/llm_confirmation_auto/llm_confirmation_auto_analysis_2026-07-14_20260715T012531Z.json",
+  "source_queue_sha256": "982ae430b7649e48fc725d7234473fe7bf3e06b2e98506c927e870754d43fb7b",
+  "task_id": "2026-07-14_001_ic_factor_rotation_momentum_active_top1_smh",
+  "task_fingerprint_v1": "c3def74d2e4286356a9942a0f884a55d2134a3cfbb61ffd25be32626fdb7cdac",
+  "ticker": "SMH",
+  "legacy_status": "ok",
+  "validation": {
+    "ready": false,
+    "reasons": [
+      "SMH: decision analysis requires at least 1 primary or regulatory source",
+      "SMH: evidence E_POLY_FED missing url",
+      "SMH: evidence E_TA_TECH missing url",
+      "SMH: evidence E_TOOL_VAL missing url",
+      "SMH: analyst action hold conflicts with derived action reduce"
+    ]
+  },
+  "expected_v2_status": "invalid"
+}
