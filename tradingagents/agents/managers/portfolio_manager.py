@@ -61,7 +61,16 @@ def create_portfolio_manager(llm):
 
 ---
 
-Be decisive and ground every conclusion in specific evidence from the analysts.{get_language_instruction()}"""
+Be decisive and ground every conclusion in specific evidence from the analysts.
+
+Do not stop at a narrative rating. Preserve at least three atomic source/date/fact -> operating-driver ->
+financial-impact chains from the analyst reports. Build bear/base/bull holding-period return scenarios,
+state probabilities that sum to 100%, and compute their probability-weighted return. Expose the most
+sensitive assumptions, evidence-quality score, falsifiers, measurable monitoring triggers, and the
+fraction of the maximum allowed position justified after bear-case risk. If the reports do not contain
+enough sourced numerical evidence, choose Hold/Underweight/Sell as appropriate and say that the
+quantitative case is incomplete instead of inventing inputs. These values are an analyst handoff only;
+downstream deterministic controls will independently recompute and validate them.{get_language_instruction()}"""
 
         final_trade_decision = invoke_structured_or_freetext(
             structured_llm,

@@ -97,6 +97,38 @@ class TestNullishFloatCoercion:
         )
         assert d.price_target is None
 
+    def test_pm_quant_fields_render_as_auditable_decision_basis(self):
+        from tradingagents.agents.schemas import render_pm_decision
+
+        d = PortfolioDecision(
+            rating=PortfolioRating.OVERWEIGHT,
+            executive_summary="Add gradually after evidence review.",
+            investment_thesis="Signed demand plus utilization supports estimate revisions.",
+            evidence_chain=[
+                "Earnings release 2026-07-09: backlog +25% -> shipments -> revenue +8% base",
+                "Industry survey 2026-07-08: units +12% -> utilization -> EPS +6% base",
+                "Regulatory filing 2026-07-07: contract signed -> forecast risk narrows",
+            ],
+            bear_case_return_pct=-20,
+            base_case_return_pct=18,
+            bull_case_return_pct=45,
+            bear_probability_pct=20,
+            base_probability_pct=50,
+            bull_probability_pct=30,
+            probability_weighted_return_pct=18.5,
+            evidence_quality_score=84,
+            position_scale_pct=60,
+            key_assumptions=["backlog converts within two quarters"],
+            falsifiers=["book-to-bill below 1.0"],
+            monitoring_triggers=["book-to-bill <1.0 -> reduce"],
+        )
+
+        md = render_pm_decision(d)
+        assert "**Evidence -> Financial Impact**" in md
+        assert "Probability-weighted return: 18.5%" in md
+        assert "**Evidence Quality**: 84.0/100" in md
+        assert "book-to-bill <1.0 -> reduce" in md
+
 
 @pytest.mark.unit
 class TestRenderResearchPlan:

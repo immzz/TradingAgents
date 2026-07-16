@@ -235,8 +235,74 @@ class PortfolioDecision(BaseModel):
         default=None,
         description="Optional recommended holding period, e.g. '3-6 months'.",
     )
+    evidence_chain: list[str] = Field(
+        default_factory=list,
+        description=(
+            "At least three atomic chains in the form source/date/fact -> operating driver -> "
+            "revenue, margin, EPS, cash-flow, or valuation impact. Preserve measured values and "
+            "name the source; do not substitute broad narrative themes."
+        ),
+    )
+    bear_case_return_pct: float | None = Field(
+        default=None,
+        description="Modeled holding-period return in the bear scenario, as a percent.",
+    )
+    base_case_return_pct: float | None = Field(
+        default=None,
+        description="Modeled holding-period return in the base scenario, as a percent.",
+    )
+    bull_case_return_pct: float | None = Field(
+        default=None,
+        description="Modeled holding-period return in the bull scenario, as a percent.",
+    )
+    bear_probability_pct: float | None = Field(default=None, ge=0, le=100)
+    base_probability_pct: float | None = Field(default=None, ge=0, le=100)
+    bull_probability_pct: float | None = Field(default=None, ge=0, le=100)
+    probability_weighted_return_pct: float | None = Field(
+        default=None,
+        description=(
+            "Probability-weighted expected holding-period return. It must equal the three supplied "
+            "scenario returns weighted by probabilities that sum to 100%."
+        ),
+    )
+    evidence_quality_score: float | None = Field(
+        default=None,
+        ge=0,
+        le=100,
+        description="0-100 assessment of source authority, independence, freshness, and relevance.",
+    )
+    position_scale_pct: float | None = Field(
+        default=None,
+        ge=0,
+        le=100,
+        description="Suggested fraction of the strategy's maximum allowed position, after downside risk.",
+    )
+    key_assumptions: list[str] = Field(
+        default_factory=list,
+        description="The high-elasticity operating and valuation assumptions behind the scenarios.",
+    )
+    falsifiers: list[str] = Field(
+        default_factory=list,
+        description="Observable facts that would invalidate the thesis or a causal link.",
+    )
+    monitoring_triggers: list[str] = Field(
+        default_factory=list,
+        description="Measurable trigger -> add/hold/reduce/exit/reassess mappings for follow-up runs.",
+    )
 
-    @field_validator("price_target", mode="before")
+    @field_validator(
+        "price_target",
+        "bear_case_return_pct",
+        "base_case_return_pct",
+        "bull_case_return_pct",
+        "bear_probability_pct",
+        "base_probability_pct",
+        "bull_probability_pct",
+        "probability_weighted_return_pct",
+        "evidence_quality_score",
+        "position_scale_pct",
+        mode="before",
+    )
     @classmethod
     def _nullish_float_to_none(cls, v):
         return _coerce_optional_float(v)
@@ -261,6 +327,38 @@ def render_pm_decision(decision: PortfolioDecision) -> str:
         parts.extend(["", f"**Price Target**: {decision.price_target}"])
     if decision.time_horizon:
         parts.extend(["", f"**Time Horizon**: {decision.time_horizon}"])
+    if decision.evidence_chain:
+        parts.extend(["", "**Evidence -> Financial Impact**:"])
+        parts.extend(f"- {item}" for item in decision.evidence_chain)
+    scenario_values = (
+        decision.bear_case_return_pct,
+        decision.base_case_return_pct,
+        decision.bull_case_return_pct,
+    )
+    if any(value is not None for value in scenario_values):
+        parts.extend(
+            [
+                "",
+                "**Scenario Model**:",
+                f"- Bear: {decision.bear_case_return_pct}% (p={decision.bear_probability_pct}%)",
+                f"- Base: {decision.base_case_return_pct}% (p={decision.base_probability_pct}%)",
+                f"- Bull: {decision.bull_case_return_pct}% (p={decision.bull_probability_pct}%)",
+                f"- Probability-weighted return: {decision.probability_weighted_return_pct}%",
+            ]
+        )
+    if decision.evidence_quality_score is not None:
+        parts.extend(["", f"**Evidence Quality**: {decision.evidence_quality_score}/100"])
+    if decision.position_scale_pct is not None:
+        parts.extend(["", f"**Position Scale**: {decision.position_scale_pct}% of maximum allowed position"])
+    if decision.key_assumptions:
+        parts.extend(["", "**Key Assumptions**:"])
+        parts.extend(f"- {item}" for item in decision.key_assumptions)
+    if decision.falsifiers:
+        parts.extend(["", "**Falsifiers**:"])
+        parts.extend(f"- {item}" for item in decision.falsifiers)
+    if decision.monitoring_triggers:
+        parts.extend(["", "**Monitoring Triggers**:"])
+        parts.extend(f"- {item}" for item in decision.monitoring_triggers)
     return "\n".join(parts)
 
 
